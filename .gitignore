@@ -1,0 +1,19 @@
+# Everything the program writes about *this* machine. The axis map holds the
+# pedals' serial number and the settings hold preset ids from a particular
+# SimPro install, so neither belongs in a public repo - and both are recreated
+# on first run anyway.
+pedal-curve-lab.axes.json
+pedal-curve-lab.settings.json
+backup/
+selftest-report.txt
+hidtest-report.txt
+
+# Build output and the venv that produces it.
+.venv/
+build/
+dist/
+__pycache__/
+*.pyc
+*.spec
+
+.history
