@@ -87,10 +87,14 @@ make build     # -> dist/pedal-curve-lab-vX.Y.Z-win64.zip
   is auto-detected (and overridable), the report layout is read from the
   device's own descriptor, and the pre-curve input bytes are found by watching
   the pedals move. So other Simagic sets such as the **P2000** should work, but
-  I have not had one to try. If yours misbehaves, run it with `--selftest`
-  (does your preset database parse?) or `--hidtest` (what do the pedals
-  actually report?) — each leaves a `-report.txt` next to the program worth
-  attaching to an issue.
+  I have not had one to try.
+- **Something misbehaving?** There's a `pedal-curve-lab.log` beside the program
+  recording what it did — every save with the values written and where the
+  backup went, the device it found, and anything that failed. *Open log file*
+  on the Live / Verify tab brings it up; attaching it to an issue says far more
+  than a description can. For deeper digging, `--selftest` (does your preset
+  database parse?) and `--hidtest` (what do the pedals actually report?) each
+  leave a `-report.txt` beside the program too.
 - Not affiliated with, endorsed by, or supported by Simagic. It writes to
   SimPro Manager's database; there is a backup before every write, but the risk
   is yours.

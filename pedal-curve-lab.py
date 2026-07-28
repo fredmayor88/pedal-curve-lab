@@ -36,6 +36,8 @@ import ctypes
 import ctypes.wintypes as wt
 import glob
 import json
+import logging
+import logging.handlers
 import os
 import queue
 import re
@@ -46,6 +48,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import datetime
 
 # Dialog titles use the short form; only the window title carries the "for
@@ -109,6 +112,81 @@ SETTINGS_PATH = os.path.join(app_dir(), "pedal-curve-lab.settings.json")
 # creates then sits in the one folder, which can be cleared out or carried to
 # another machine in one move, and the Simagic install is left as it was.
 BACKUP_DIR = os.path.join(app_dir(), "backup")
+
+# A packaged build has no console, so without this a crash leaves the user with
+# nothing to report but "it closed". One file beside the program, which is
+# something they can find and attach to a message.
+LOG_PATH = os.path.join(app_dir(), "pedal-curve-lab.log")
+
+log = logging.getLogger("pedal-curve-lab")
+
+
+def setup_logging():
+    """Start the log file. Safe to call more than once.
+
+    Rotated at a quarter of a megabyte keeping one old copy: enough for a
+    session's detail, small enough to attach to a message, and bounded so it
+    can never quietly eat a disk. A folder that cannot be written to - someone
+    running this from a read-only location - costs the log, not the program.
+    """
+    if log.handlers:
+        return
+    log.setLevel(logging.DEBUG)
+    try:
+        handler = logging.handlers.RotatingFileHandler(
+            LOG_PATH, maxBytes=256 * 1024, backupCount=1, encoding="utf-8")
+    except OSError:
+        log.addHandler(logging.NullHandler())
+        return
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)-7s %(message)s", "%Y-%m-%d %H:%M:%S"))
+    log.addHandler(handler)
+
+    log.info("=" * 62)
+    log.info("%s %s starting", APP_NAME, APP_VERSION)
+    log.info("python %s, %s", sys.version.split()[0],
+             "packaged build" if getattr(sys, "frozen", False) else "from source")
+    log.info("program folder: %s", app_dir())
+    log.info("database: %s (%s)", DB_PATH,
+             "found" if os.path.exists(DB_PATH) else "NOT FOUND")
+
+
+def log_exception_hooks():
+    """Route crashes outside the interface into the log as well.
+
+    A windowed build has no stderr, so an exception on a worker thread or on
+    the way out of main would otherwise leave no trace at all.
+    """
+    def excepthook(kind, value, tb):
+        log.error("unhandled exception\n%s",
+                  "".join(traceback.format_exception(kind, value, tb)).rstrip())
+        if sys.stderr is not None:          # None in a packaged build
+            sys.__excepthook__(kind, value, tb)
+
+    sys.excepthook = excepthook
+
+    if hasattr(threading, "excepthook"):
+        def thread_hook(args):
+            name = getattr(args.thread, "name", "?")
+            log.error("unhandled exception on thread %s\n%s", name,
+                      "".join(traceback.format_exception(
+                          args.exc_type, args.exc_value,
+                          args.exc_traceback)).rstrip())
+
+        threading.excepthook = thread_hook
+
+
+def open_in_explorer(path, select=False):
+    """Show a file or folder. -> (ok, detail)."""
+    try:
+        if select:
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+        else:
+            os.startfile(os.path.normpath(path))
+        return True, ""
+    except Exception as exc:
+        log.warning("could not open %s: %s", path, exc)
+        return False, str(exc)
 
 # Axis ids as they appear in field 27.1. Names verified against the P1000 UI by
 # matching each block's lo/hi range to the sliders shown for each pedal. Other
@@ -828,9 +906,76 @@ def save_preset(preset_id, blob, storage, db_path=DB_PATH):
     con.close()
 
 
+class _PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [("dwSize", wt.DWORD), ("cntUsage", wt.DWORD),
+                ("th32ProcessID", wt.DWORD),
+                ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+                ("th32ModuleID", wt.DWORD), ("cntThreads", wt.DWORD),
+                ("th32ParentProcessID", wt.DWORD),
+                ("pcPriClassBase", ctypes.c_long), ("dwFlags", wt.DWORD),
+                ("szExeFile", ctypes.c_wchar * 260)]
+
+
+TH32CS_SNAPPROCESS = 0x02
+
+
+def _process_names():
+    """Image name of every running process, or None if the snapshot fails.
+
+    A toolhelp snapshot rather than `tasklist`, because this is asked several
+    times over a single save - once before writing, repeatedly while waiting
+    for SimPro to exit, then once per tab as they reload - and spawning a
+    console tool for each answer cost more than half a second a time. The
+    snapshot costs about a millisecond. Image names are readable without
+    elevation, which is all that is needed here.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        k = ctypes.windll.kernel32
+        k.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+        k.CreateToolhelp32Snapshot.argtypes = [wt.DWORD, wt.DWORD]
+        k.Process32FirstW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        k.Process32NextW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        k.CloseHandle.argtypes = [ctypes.c_void_p]
+        snap = k.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if not snap or snap == _INVALID_HANDLE:
+            return None
+        try:
+            entry = _PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(entry)
+            out = []
+            ok = k.Process32FirstW(ctypes.c_void_p(snap), ctypes.byref(entry))
+            while ok:
+                out.append(entry.szExeFile)
+                ok = k.Process32NextW(ctypes.c_void_p(snap), ctypes.byref(entry))
+            return out
+        finally:
+            k.CloseHandle(ctypes.c_void_p(snap))
+    except Exception:
+        return None
+
+
+def _simpro_names(texts):
+    """SimPro image names, extension trimmed the way taskkill wants them.
+
+    `simdaemon` deliberately does not match: killing it would take the pedals
+    down with it, and it is not what overwrites a preset.
+    """
+    out = set()
+    for t in texts:
+        m = re.match(r"simpro\w*", t, re.I)
+        if m:
+            out.add(m.group(0))
+    return sorted(out)
+
+
 def simpro_running():
     """Names of any running SimPro Manager UI processes (simdaemon excluded)."""
-    try:
+    names = _process_names()
+    if names is not None:
+        return _simpro_names(names)
+    try:                                 # fallback if the snapshot is refused
         out = subprocess.run(
             ["tasklist", "/fo", "csv", "/nh"],
             capture_output=True, text=True, timeout=15,
@@ -1004,13 +1149,16 @@ def start_simpro(exe):
 
 
 def _wait_simpro_gone(timeout):
+    # Polled tightly because the check is a process snapshot costing about a
+    # millisecond: the wait now ends when SimPro actually exits rather than up
+    # to a third of a second later, and this sits in the middle of a save.
     deadline = time.time() + timeout
     while True:
         if not simpro_running():
             return True
         if time.time() >= deadline:
             return False
-        time.sleep(0.3)
+        time.sleep(0.1)
 
 
 def kill_simpro(timeout=10.0):
@@ -1765,8 +1913,27 @@ def launch_gui():
         except Exception:
             scale = 1.0
 
+    setup_logging()
+
     root = tk.Tk()
     root.title(APP_TITLE)
+
+    # Tk swallows an exception raised inside a callback and carries on. In a
+    # packaged build there is no stderr for it to land on either, so without
+    # this the interface would simply stop responding to a button with no
+    # trace of why. Logged first, then said plainly, with where to look.
+    def report_callback_exception(kind, value, tb):
+        log.error("unhandled error in the interface\n%s",
+                  "".join(traceback.format_exception(kind, value, tb)).rstrip())
+        try:
+            messagebox.showerror(
+                APP_NAME,
+                "Something went wrong:\n\n%s: %s\n\n"
+                "The details were written to:\n%s" % (kind.__name__, value, LOG_PATH))
+        except Exception:
+            pass
+
+    root.report_callback_exception = report_callback_exception
     # default= rather than a plain call, so the dialogs this app opens as their
     # own toplevels wear it too. Cosmetic either way, so a missing or unreadable
     # file just leaves Tk's feather in the title bar rather than stopping the
@@ -2556,24 +2723,34 @@ def launch_gui():
         if any(pts[i][1] > pts[i + 1][1] for i in range(len(pts) - 1)):
             problems.append("Output % values must not decrease "
                             "(a falling curve makes the pedal go backwards).")
+        log.info("save requested: preset %s %r, %s, lo=%s hi=%s, points=%s",
+                 p["id"], p["name"], ax["name"], lo, hi,
+                 [(x, y) for x, y in pts])
         if problems:
+            log.warning("save refused: %s", "; ".join(problems))
             messagebox.showerror(APP_NAME, "\n\n".join(problems))
             return False
 
         running = simpro_running()
         restart_exe = None
         if running:
+            log.info("SimPro Manager is running (%s)", ", ".join(running))
             if not ask_kill_and_store(running):
+                log.info("save cancelled at the SimPro prompt")
                 return False
             # Located before the kill, purely so a missing install is reported
             # while SimPro is still up rather than after it has been closed.
             restart_exe = find_simpro_exe()
+            log.info("SimPro executable: %s", restart_exe or "NOT FOUND")
             root.config(cursor="watch")
             root.update_idletasks()
+            started = time.time()
             try:
                 killed, detail = kill_simpro()
             finally:
                 root.config(cursor="")
+            log.info("kill_simpro -> %s in %.1fs%s", killed, time.time() - started,
+                     ": %s" % detail if detail else "")
             if not killed:
                 messagebox.showerror(
                     APP_NAME,
@@ -2591,9 +2768,16 @@ def launch_gui():
             if got["points"] != pts or got["hi"] != hi:
                 raise ValueError("verification of the re-encoded preset failed")
             dest = backup_db()
+            log.info("backup written: %s", dest)
             save_preset(p["id"], new_blob, p["storage"])
-        except Exception as exc:
-            messagebox.showerror(APP_NAME, "Write failed:\n\n%s" % exc)
+            log.info("preset %s written (%d bytes, storage %s)",
+                     p["id"], len(new_blob), p["storage"])
+        except Exception:
+            log.exception("write failed")
+            messagebox.showerror(
+                APP_NAME,
+                "Write failed:\n\n%s\n\nThe details were written to:\n%s"
+                % (traceback.format_exc().strip().splitlines()[-1], LOG_PATH))
             return False
 
         # Started again only once the new blob is safely on disk, so what it
@@ -2601,6 +2785,7 @@ def launch_gui():
         if running:
             if restart_exe:
                 ok, why = start_simpro(restart_exe)
+                log.info("restart SimPro -> %s%s", ok, ": %s" % why if why else "")
                 next_step = ("SimPro Manager is starting again - re-select the "
                              "preset there to push it to the pedals."
                              if ok else
@@ -2650,11 +2835,10 @@ def launch_gui():
 
     def open_db_folder():
         """Open Explorer with user.db selected."""
-        try:
-            subprocess.Popen(["explorer", "/select,", os.path.normpath(DB_PATH)])
-        except Exception as exc:
+        ok, why = open_in_explorer(DB_PATH, select=True)
+        if not ok:
             messagebox.showerror(APP_NAME,
-                                 "Could not open Explorer:\n\n%s" % exc)
+                                 "Could not open Explorer:\n\n%s" % why)
 
     ttk.Button(btns, text="Reload", command=reload_db).pack(side="left")
     ttk.Button(btns, text="Make linear", command=make_linear).pack(side="left", padx=6)
@@ -3770,6 +3954,21 @@ def launch_gui():
 
     marker_box(lv_side).pack(fill="x", pady=(12, 0))
 
+    def show_log():
+        if not os.path.exists(LOG_PATH):
+            messagebox.showinfo(APP_NAME, "Nothing has been logged yet.")
+            return
+        ok, why = open_in_explorer(LOG_PATH)
+        if not ok:
+            messagebox.showerror(APP_NAME, "Could not open the log:\n\n%s" % why)
+
+    # On this tab rather than all four: it is where you already are when
+    # something is not behaving. Kept to a bare button, matching the one the
+    # editor tabs carry - this panel is the tallest in the app already, and a
+    # labelled box with a line of explanation under it does not fit.
+    ttk.Button(lv_side, text="Open log file",
+               command=show_log).pack(fill="x", pady=(10, 0))
+
     lv_foot = ttk.Frame(tab_live)
     lv_foot.grid(row=2, column=0, sticky="nsew")
     insp = ttk.Labelframe(lv_foot, text=" HID input report ", padding=(10, 6))
@@ -4253,9 +4452,15 @@ def launch_gui():
                 save_axis_map(live["maps"])
             live["map"] = live["maps"].get(key, {})
             lv_dev.config(text="connected  -  %s" % device_label(r.info))
+            log.info("connected: %s", device_label(r.info))
+            log.info("  report %d bytes, axes %s, paired %s",
+                     r.info["report_len"],
+                     [GD_USAGE_NAMES.get(u, hex(u)) for u, _m, _r in r.out_axes],
+                     live["map"] or "not yet")
         else:
             live["reader"] = None
             lv_dev.config(text="not connected: %s" % r.error)
+            log.warning("no live connection: %s", r.error)
         update_pair_label()
         draw_live()
 
@@ -4389,6 +4594,8 @@ def finish_report(path):
 
 
 if __name__ == "__main__":
+    setup_logging()
+    log_exception_hooks()
     if "--version" in sys.argv:
         line = "%s %s" % (APP_NAME, APP_VERSION)
         if getattr(sys, "frozen", False):
