@@ -39,6 +39,14 @@ endif
 
 APP      := pedal-curve-lab
 MAIN     := $(APP).py
+# Used twice over: --icon burns it into the executable for Explorer and the
+# taskbar, --add-data ships the file itself so the running window can wear it
+# too. They are separate mechanisms and neither implies the other.
+#
+# Absolute, because --specpath puts the generated spec under build/ and
+# PyInstaller resolves data paths relative to the spec, not to where make was
+# run. Quoted at each use so a checkout under a path with spaces still works.
+ICON     := $(CURDIR)/icon.ico
 VENV     := .venv
 DIST     := dist
 BUILD    := build
@@ -111,6 +119,7 @@ freeze: $(VPY)
 	$(VPY) -m PyInstaller \
 	  --noconfirm --clean --onedir --windowed \
 	  --name $(APP) \
+	  --icon "$(ICON)" --add-data "$(ICON);." \
 	  --distpath $(DIST) --workpath $(BUILD) --specpath $(BUILD) \
 	  $(MAIN)
 	cp README.md LICENSE $(STAGE)/

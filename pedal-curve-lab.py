@@ -71,6 +71,18 @@ def app_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def icon_path():
+    """The window icon, wherever this copy of the program keeps it.
+
+    Not app_dir(): a frozen build unpacks bundled data into its own folder,
+    which PyInstaller points sys._MEIPASS at, while app_dir() is the visible
+    folder beside the executable where *written* state belongs. The icon is
+    read-only baggage, so it travels with the bundle.
+    """
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, "icon.ico")
+
+
 def _find_db_path():
     """Newest user.db under any Simpro* install; the Simpro3 path if none.
 
@@ -1755,6 +1767,14 @@ def launch_gui():
 
     root = tk.Tk()
     root.title(APP_TITLE)
+    # default= rather than a plain call, so the dialogs this app opens as their
+    # own toplevels wear it too. Cosmetic either way, so a missing or unreadable
+    # file just leaves Tk's feather in the title bar rather than stopping the
+    # program starting.
+    try:
+        root.iconbitmap(default=icon_path())
+    except Exception:
+        pass
     root.configure(bg=BG)
     if scale != 1.0:
         root.tk.call("tk", "scaling", scale * 1.3333)
