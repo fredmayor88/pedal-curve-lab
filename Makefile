@@ -1,14 +1,41 @@
 # Pedal Curve Lab - dev and release tasks.
 #
-# Meant to be run from Git Bash on Windows (that is where `make` lives on a
-# normal Windows box, and `build` can only run on Windows anyway - PyInstaller
-# freezes for the platform it runs on, it does not cross-compile).
+# Needs make itself (GnuWin32, Chocolatey, Scoop or MSYS2 - it is not part of
+# Git for Windows) and Git for Windows, which supplies the shell these recipes
+# are written in.
 #
 # The program itself needs nothing but a stock Python: standard library,
 # tkinter and ctypes. The virtualenv exists for PyInstaller alone, which is
 # why there is no requirements.txt to keep in sync.
 
 .DEFAULT_GOAL := help
+
+# Make on Windows falls back to cmd.exe unless it finds a POSIX shell on PATH,
+# and cmd cannot run a line of what follows. Launched from PowerShell it finds
+# nothing, so it is pointed at the sh.exe that Git for Windows ships, and that
+# folder is put on PATH as well - otherwise sh starts but sed, rm and cp are
+# still missing. The net effect is that `make` works from any shell rather
+# than only from Git Bash.
+#
+# The wildcards are how the spaces in "Program Files" are dodged: make splits
+# variables on whitespace, so $(dir ...) and $(firstword ...) would tear these
+# paths in half, while a `*` matches the space without ever naming it.
+ifeq ($(OS),Windows_NT)
+  GITBIN := $(wildcard C:/Program*Files/Git/usr/bin)
+  ifeq ($(GITBIN),)
+    GITBIN := $(wildcard $(subst \,/,$(LOCALAPPDATA))/Programs/Git/usr/bin)
+  endif
+  ifneq ($(GITBIN),)
+    SHELL := $(GITBIN)/sh.exe
+    export PATH := $(GITBIN);$(PATH)
+  else
+    # Nothing found, but make may have located a shell by itself - it records
+    # a full path when it did, and the bare name "sh.exe" when it did not.
+    ifeq ($(findstring /,$(SHELL)),)
+      $(error no POSIX shell found: install Git for Windows, or run this from a shell that has one)
+    endif
+  endif
+endif
 
 APP      := pedal-curve-lab
 MAIN     := $(APP).py
@@ -46,7 +73,7 @@ help:
 	@echo "  make run      run from source"
 	@echo "  make live     run from source, opening on the Live / Verify tab"
 	@echo "  make test     encode/decode and curve-model round-trip checks"
-	@echo "  make build    freeze to $(STAGE)/ and zip it (Windows only)"
+	@echo "  make build    freeze to $(STAGE)/ and zip it"
 	@echo "  make release  build, tag $(TAG) and publish it to GitHub"
 	@echo "  make clean    remove build output"
 	@echo

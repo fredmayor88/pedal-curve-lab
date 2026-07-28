@@ -57,7 +57,13 @@ After saving, re-select the preset in SimPro Manager to push it to the pedals.
 
 ## From source
 
-Needs Python 3.9+ and nothing else — standard library, tkinter, ctypes.
+Needs Python 3.8+ and nothing else — standard library, tkinter, ctypes. To run
+it without any of the below: `python pedal-curve-lab.py`.
+
+The `make` targets need two things on Windows: **Git for Windows** (whose shell
+runs the recipes — the Makefile finds it for you, so any terminal will do) and
+**`make`** itself, which is *not* part of Git — GnuWin32, `choco install make`,
+Scoop or MSYS2 all work.
 
 ```
 make run       # run it
