@@ -17,7 +17,7 @@ so curves you build here show up there as normal presets.
 
 ![Pivot curve tab: the stored curve in red and the measured pedal response in cyan,
 overlaid on one graph, with the three stored points, deadzone trim and per-point slope
-readouts alongside](docs/pivot-curve.png)
+readouts alongside](https://raw.githubusercontent.com/fredmayor88/pedal-curve-lab/main/docs/pivot-curve.png)
 
 *Pivot mode, mid-edit. Red is the curve being edited. Cyan is a sweep recorded from the
 pedals beforehand — the response I was already driving — left on the chart as a reference,
@@ -67,7 +67,9 @@ response, rather than a hand-drawn approximation of one.
 
 ## Get it
 
-Grab the zip from [Releases](../../releases), unzip anywhere, run `pedal-curve-lab.exe`.
+Grab the zip from
+[Releases](https://github.com/fredmayor88/pedal-curve-lab/releases), unzip anywhere, run
+`pedal-curve-lab.exe`.
 
 No installer, no Python, no dependencies. Everything it writes — settings, DB backups —
 stays in that folder. Move it about or delete it and you're back to nothing.
@@ -154,7 +156,7 @@ own descriptor. The pre-curve input bytes are found by watching the pedals move.
 
 So nothing is tied to a specific model. But detection working on hardware I've never
 touched is a reasonable expectation, not a tested fact — if it finds your pedals, or if it
-doesn't, [open an issue](../../issues).
+doesn't, [open an issue](https://github.com/fredmayor88/pedal-curve-lab/issues).
 
 ## From source
 
