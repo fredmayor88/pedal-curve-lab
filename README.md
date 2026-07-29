@@ -24,7 +24,7 @@ pedals beforehand — the response I was already driving — left on the chart a
 so I can see exactly what I'm changing and by how much. Hover anywhere and you get both:
 at 60.56% travel the new curve gives 42.87% output, where the old one measured 48.97%.*
 
-**▶ Quick start video (7 min):** https://www.youtube.com/watch?v=5uPeqN9SkiE
+**▶ Quick start video (7 min):** https://www.youtube.com/watch?v=39lVrCCBohg
 
 ---
 
