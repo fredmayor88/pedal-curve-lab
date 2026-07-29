@@ -49,6 +49,7 @@ import sys
 import threading
 import time
 import traceback
+import webbrowser
 import datetime
 
 # Dialog titles use the short form; only the window title carries the "for
@@ -59,6 +60,11 @@ APP_TITLE = "%s for Simagic" % APP_NAME
 # Read by the Makefile to name the build and tag the release, so the version
 # is stated once and the two can never disagree.
 APP_VERSION = "0.1.0"
+
+# The two places the Help tab sends people. Stated here so the tab is a layout
+# and nothing else, and so a moved video or repo is one edit.
+TUTORIAL_URL = "https://www.youtube.com/watch?v=5uPeqN9SkiE"
+ISSUES_URL = "https://github.com/fredmayor88/pedal-curve-lab/issues"
 
 
 def app_dir():
@@ -207,6 +213,20 @@ def open_in_explorer(path, select=False):
         return True, ""
     except Exception as exc:
         log.warning("could not open %s: %s", path, exc)
+        return False, str(exc)
+
+
+def open_url(url):
+    """Open a link in the default browser. -> (ok, detail).
+
+    Same shape as open_in_explorer above, so the caller handles a machine with
+    no browser association the same way it handles one with no Explorer.
+    """
+    try:
+        webbrowser.open_new_tab(url)
+        return True, ""
+    except Exception as exc:
+        log.warning("could not open %s: %s", url, exc)
         return False, str(exc)
 
 # Axis ids as they appear in field 27.1. Names verified against the P1000 UI by
@@ -2279,10 +2299,14 @@ def launch_gui():
     tab_pivot = ttk.Frame(nb)
     tab_slope = ttk.Frame(nb)
     tab_live = ttk.Frame(nb)
+    tab_help = ttk.Frame(nb)
     nb.add(tab_curve, text="3-point curve")
     nb.add(tab_pivot, text="Pivot curve")
     nb.add(tab_slope, text="Slope curve")
     nb.add(tab_live, text="Live / Verify")
+    # Last, and filled in at the bottom of this function: it is the one tab
+    # that reads the others rather than being read by them.
+    nb.add(tab_help, text="Help")
     PIVOT_COL = "#7f8cff"        # the draggable pivot handle
 
     # ---- layout ---------------------------------------------------------
@@ -4669,6 +4693,190 @@ def launch_gui():
     for _mv in marker_vars:
         _mv.trace_add("write", display_changed)
     slope_colour.trace_add("write", display_changed)
+
+    # ================= Help tab =================
+    #
+    # Text and two buttons. It carries none of the layout the four editor tabs
+    # share - no header, no side panel, no chart - so it is built here on its
+    # own terms rather than from their helpers, and its styles are all named
+    # ones: nothing configured below can reach a widget on another tab. Last in
+    # the file as well as last in the notebook, so it can call show_log().
+
+    # Cyan is the accent and stays one: the rules beside the headings and the
+    # links, and nothing else on the tab.
+    CYAN, CYAN_HOT, DIM = "#25c4e2", "#5fd7ec", "#9a9aa5"
+
+    _hf = tkfont.nametofont("TkDefaultFont")
+    _fam, _sz = _hf.cget("family"), abs(_hf.cget("size"))
+    style.configure("HelpTitle.TLabel", foreground=FG, font=(_fam, _sz + 4, "bold"))
+    style.configure("HelpHead.TLabel", foreground=FG, font=(_fam, _sz + 1, "bold"))
+    style.configure("HelpName.TLabel", foreground=FG, font=(_fam, _sz, "bold"))
+    style.configure("HelpBody.TLabel", foreground="#c2c2cc")
+    style.configure("HelpDim.TLabel", foreground=DIM)
+
+    # Two columns, because in one the page runs off the bottom of the window and
+    # there is nothing to scroll it with. One measure for every paragraph, so
+    # the right edge of the text is a straight line down each column. 390 is
+    # what two columns plus the padding and the gap fit into at the window's
+    # minimum width, with a little to spare - the tab never needs a scrollbar
+    # in either direction, at any size the window can be dragged to. The
+    # paragraphs are cut to that budget as well: a wider measure is fewer
+    # lines, so the two numbers have to be chosen together.
+    HELP_W = int(390 * scale)
+
+    page = ttk.Frame(tab_help, padding=(28, 22))
+    page.pack(anchor="nw", fill="x")
+
+    def browse(url):
+        ok, why = open_url(url)
+        if not ok:
+            messagebox.showerror(
+                APP_NAME, "Could not open the browser:\n\n%s\n\n%s" % (url, why))
+
+    def help_link(parent, url, text=None):
+        """A clickable URL. Shows the address itself unless given other text,
+        so you can see where it goes before you click it.
+
+        Wrapped to the column like any paragraph: a title long enough to run
+        past it would otherwise set the column's width and shove the second
+        column off the side of the window.
+        """
+        lab = tk.Label(parent, text=text or url, bg=BG, fg=CYAN, cursor="hand2",
+                       font=(_fam, _sz, "underline"), justify="left",
+                       wraplength=HELP_W)
+        lab.bind("<Button-1>", lambda _e, u=url: browse(u))
+        lab.bind("<Enter>", lambda _e: lab.configure(fg=CYAN_HOT))
+        lab.bind("<Leave>", lambda _e: lab.configure(fg=CYAN))
+        return lab
+
+    def help_section(column, title):
+        """Heading with a cyan rule. -> the frame its content goes in."""
+        head = ttk.Frame(column)
+        head.pack(fill="x", anchor="w", pady=(14, 6))
+        tk.Frame(head, bg=CYAN, width=3).pack(side="left", fill="y")
+        ttk.Label(head, text=title, style="HelpHead.TLabel",
+                  padding=(9, 0)).pack(side="left")
+        box = ttk.Frame(column, padding=(12, 0, 0, 0))   # clears the rule
+        box.pack(fill="x", anchor="w")
+        return box
+
+    def help_text(parent, text, style_name="HelpBody.TLabel", pady=(0, 0)):
+        ttk.Label(parent, text=text, style=style_name, justify="left",
+                  wraplength=HELP_W).pack(anchor="w", pady=pady)
+
+    ttk.Label(page, text="%s %s" % (APP_NAME, APP_VERSION),
+              style="HelpTitle.TLabel").pack(anchor="w")
+    # Across both columns rather than one, so the strapline is a single line.
+    ttk.Label(page, text="Reads and writes the pedal curves SimPro Manager "
+                         "keeps, with a live view of what the pedals are "
+                         "actually sending.",
+              style="HelpDim.TLabel", justify="left",
+              wraplength=HELP_W * 2).pack(anchor="w", pady=(4, 0))
+
+    cols = ttk.Frame(page)
+    cols.pack(anchor="nw", pady=(2, 0))
+    left = ttk.Frame(cols)
+    left.pack(side="left", anchor="n")
+    right = ttk.Frame(cols)
+    right.pack(side="left", anchor="n", padx=(int(34 * scale), 0))
+
+    # ---- tutorial -------------------------------------------------------
+    sec = help_section(left, "Start here")
+    help_text(sec, "How to change a curve and get it onto the pedals.",
+              pady=(0, 6))
+    help_link(sec, TUTORIAL_URL,
+              "Pedal Curve Lab: Precise Pedal Curves + Live Verification for "
+              "Simagic Pedals").pack(anchor="w")
+
+    # ---- the tabs -------------------------------------------------------
+    sec = help_section(left, "The tabs")
+    for _name, _what in (
+            ("3-point curve",
+             "Drag the three stored points, or type their outputs. The most "
+             "direct of the four."),
+            ("Pivot curve",
+             "Set one point and the slope running through it; the three stored "
+             "points are fitted to that shape."),
+            ("Slope curve",
+             "Build the curve from the output at 25% and the slope of each "
+             "segment after it - for when you think in feel rather than in "
+             "coordinates."),
+            ("Live / Verify",
+             "Watch the pedal as you press it, record a sweep, and lay what "
+             "the device measured over the curve you stored.")):
+        ttk.Label(sec, text=_name, style="HelpName.TLabel"
+                  ).pack(anchor="w", pady=(6, 1))
+        help_text(sec, _what)
+    help_text(sec, "The first three are three ways of editing one and the same "
+                   "curve, so mix and match freely: rough the shape out on the "
+                   "pivot tab, nudge a point by hand on the 3-point tab, then "
+                   "check it against the pedal on Live / Verify. Switching "
+                   "tabs carries your edit across.", pady=(12, 0))
+
+    # ---- the limitation -------------------------------------------------
+    sec = help_section(right, "What actually reaches the pedals")
+    help_text(sec, "Beside the deadzone, Simagic stores exactly three numbers "
+                   "for a pedal's curve: the output at 25%, 50% and 75% of "
+                   "travel. The end point is fixed at 100/100, and everything "
+                   "between is interpolation - by the chart here, by the "
+                   "firmware there.")
+    help_text(sec, "So only those three outputs are ever written: a shape "
+                   "needing a fourth control point cannot be stored, and what "
+                   "you get back is the closest the three can come to it.",
+              pady=(8, 0))
+
+    # ---- issues ---------------------------------------------------------
+    sec = help_section(right, "Issues, problems, suggestions")
+    help_text(sec, "Two places, both fine: a comment under the tutorial video, "
+                   "or an issue - or a pull request - on GitHub.", pady=(0, 6))
+    help_link(sec, ISSUES_URL).pack(anchor="w")
+    help_text(sec, "If it is a bug, attach the log: it records the build, the "
+                   "database, the device and anything that went wrong.",
+              pady=(12, 6))
+    # The path itself is not printed: it is the one thing on this tab whose
+    # height depends on where the program was unzipped to, and the buttons
+    # under it get you there without reading it out.
+    help_text(sec, "One file: pedal-curve-lab.log, beside the program.",
+              "HelpDim.TLabel")
+
+    def open_log_folder():
+        """Explorer on the log - or on the folder, before anything is logged."""
+        have = os.path.exists(LOG_PATH)
+        ok, why = open_in_explorer(LOG_PATH if have else app_dir(), select=have)
+        if not ok:
+            messagebox.showerror(APP_NAME,
+                                 "Could not open Explorer:\n\n%s" % why)
+
+    _btns = ttk.Frame(sec)
+    _btns.pack(anchor="w", pady=(10, 0))
+    ttk.Button(_btns, text="Open log file", command=show_log).pack(side="left")
+    ttk.Button(_btns, text="Show in folder",
+               command=open_log_folder).pack(side="left", padx=(8, 0))
+
+    # ---- getting a database back ----------------------------------------
+    sec = help_section(right, "If a save goes wrong")
+    help_text(sec, "Every save copies user.db into a backup folder beside the "
+                   "program first, stamped with the time. To put one back: "
+                   "close SimPro Manager, then copy the newest "
+                   "user_precurve_*.db over SimPro's own user.db, under that "
+                   "name.")
+    help_text(sec, "Change database... points the editor at a backup instead, "
+                   "if you would rather read one first.", pady=(8, 0))
+
+    def show_backups():
+        """Explorer on the backup folder - once a save has made one."""
+        if not os.path.isdir(BACKUP_DIR):
+            messagebox.showinfo(
+                APP_NAME, "No backups yet - the folder is made the first time "
+                          "you save to the database.")
+            return
+        ok, why = open_in_explorer(BACKUP_DIR)
+        if not ok:
+            messagebox.showerror(APP_NAME,
+                                 "Could not open Explorer:\n\n%s" % why)
+
+    ttk.Button(sec, text="Show backup folder",
+               command=show_backups).pack(anchor="w", pady=(10, 0))
 
     connect(refresh_devices())
     refresh_live_axes()
