@@ -91,6 +91,9 @@ def _find_db_path():
 
     Pinned to a version folder this would go stale the day SimPro 4 ships;
     globbing mirrors how find_simpro_exe() already locates the executable.
+
+    Note this is per-user application data, not the install directory, so
+    where SimPro Manager itself was installed does not move it.
     """
     root = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Simagic")
     hits = glob.glob(os.path.join(root, "Simpro*", "storage", "user.db"))
@@ -99,7 +102,25 @@ def _find_db_path():
     return os.path.join(root, "Simpro3", "storage", "user.db")
 
 
-DB_PATH = _find_db_path()
+# Where the DB would be found on an ordinary install, kept apart from the one
+# actually in use so a chosen path can be told from a detected one - that
+# difference is what the header strip reports.
+DEFAULT_DB_PATH = _find_db_path()
+DB_PATH = DEFAULT_DB_PATH
+
+
+def set_db_path(path):
+    """Point every DB call at another user.db for the rest of the session.
+
+    The reads and writes below take `db_path=None` and resolve it here at call
+    time rather than defaulting to DB_PATH in their signatures: a default
+    argument is bound once when the function is defined, so those copies would
+    all still address the database found at startup.
+    """
+    global DB_PATH
+    DB_PATH = os.path.abspath(path)
+    log.info("database: %s (chosen)", DB_PATH)
+    return DB_PATH
 
 AXES_CACHE = os.path.join(app_dir(), "pedal-curve-lab.axes.json")
 
@@ -806,7 +827,7 @@ def predicted_output(axis, input_pct, mode="linear"):
 # database access
 # --------------------------------------------------------------------------
 
-def load_presets(db_path=DB_PATH):
+def load_presets(db_path=None):
     """Presets whose blob carries pedal curve data, i.e. field-27 axis blocks.
 
     The DB is shared by every Simagic product SimPro manages, so on a rig with
@@ -815,6 +836,7 @@ def load_presets(db_path=DB_PATH):
     id) keeps any pedal model in and everything unparseable out - a preset the
     tool cannot parse is also one it must never rewrite.
     """
+    db_path = db_path or DB_PATH
     con = sqlite3.connect("file:%s?mode=ro" % db_path.replace("\\", "/"), uri=True)
     con.text_factory = bytes
     rows = con.execute(
@@ -852,7 +874,7 @@ def preset_labels(presets):
             for p in presets]
 
 
-def load_selected_preset_uuids(db_path=DB_PATH):
+def load_selected_preset_uuids(db_path=None):
     """presetUUIDs SimPro records as loaded, most device-specific first.
 
     There is one 'selected_preset' row per product (pedals, wheel base, ...),
@@ -860,6 +882,7 @@ def load_selected_preset_uuids(db_path=DB_PATH):
     a preset it actually loaded - that is what scopes the lookup to the
     pedals without knowing their productUUID up front.
     """
+    db_path = db_path or DB_PATH
     try:
         con = sqlite3.connect("file:%s?mode=ro" % db_path.replace("\\", "/"),
                               uri=True)
@@ -873,31 +896,31 @@ def load_selected_preset_uuids(db_path=DB_PATH):
         return []
 
 
-def pick_selected_preset(presets, db_path=DB_PATH):
+def pick_selected_preset(presets, db_path=None):
     """Index into presets of the one SimPro has loaded, or None."""
-    for active in load_selected_preset_uuids(db_path):
+    for active in load_selected_preset_uuids(db_path or DB_PATH):
         for n, p in enumerate(presets):
             if p["uuid"] == active:
                 return n
     return None
 
 
-def backup_db(db_path=DB_PATH):
+def backup_db(db_path=None):
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     os.makedirs(BACKUP_DIR, exist_ok=True)
     dest = os.path.join(BACKUP_DIR, "user_precurve_%s.db" % stamp)
-    shutil.copy2(db_path, dest)
+    shutil.copy2(db_path or DB_PATH, dest)
     return dest
 
 
-def save_preset(preset_id, blob, storage, db_path=DB_PATH):
+def save_preset(preset_id, blob, storage, db_path=None):
     """Write the blob back, preserving the original storage class.
 
     SimPro binds these blobs as TEXT (with embedded NULs). CAST(? AS TEXT)
     relabels a blob parameter as text without touching the bytes, so the row
     keeps the exact shape the app wrote.
     """
-    con = sqlite3.connect(db_path)
+    con = sqlite3.connect(db_path or DB_PATH)
     sql = ("update preset set presetData = CAST(? AS TEXT) where id = ?"
            if storage == "text" else
            "update preset set presetData = ? where id = ?")
@@ -1721,6 +1744,85 @@ def save_settings(data):
         return True
     except Exception:
         return False
+
+
+def db_is_usable(path):
+    """Whether a file is a SimPro DB this tool can edit. -> (ok, detail).
+
+    Opening it is the whole test: load_presets keeps only the rows whose blob
+    parses into axis blocks, so a file that yields none is either not a SimPro
+    database or holds nothing this program has any business rewriting.
+    """
+    try:
+        presets = load_presets(path)
+    except Exception as exc:
+        return False, "It could not be read as a SimPro database:\n\n%s" % exc
+    if not presets:
+        return False, ("It opened, but holds no presets with pedal curve "
+                       "data - so it is either not SimPro Manager's user.db "
+                       "or no curves have been saved in it yet.")
+    return True, "%d preset%s with curve data" % (len(presets),
+                                                  "" if len(presets) == 1 else "s")
+
+
+def ask_db_path(parent=None):
+    """File dialog for user.db, opening where it normally lives. -> path or "".
+
+    Starts at whichever database is in use, falling back to the standard
+    location and then to the Simagic folder, so the common case is a couple of
+    clicks and the unusual one still starts somewhere near.
+    """
+    from tkinter import filedialog
+    for d in (os.path.dirname(DB_PATH), os.path.dirname(DEFAULT_DB_PATH),
+              os.path.join(os.environ.get("LOCALAPPDATA", ""), "Simagic"),
+              os.path.expanduser("~")):
+        if d and os.path.isdir(d):
+            break
+    return filedialog.askopenfilename(
+        parent=parent, title="Select SimPro Manager's user.db",
+        initialdir=d, initialfile="user.db",
+        filetypes=[("SimPro database", "user.db"),
+                   ("SQLite database", "*.db"),
+                   ("All files", "*.*")])
+
+
+def locate_db():
+    """Ask for the database when it was not where it should be. -> bool.
+
+    A packaged build has no console, so exiting with a printed message would
+    tell the user nothing whatsoever - the program would simply never appear.
+    This is also the way in for anyone whose SimPro data does not sit where it
+    normally does.
+    """
+    import tkinter as tk
+    from tkinter import messagebox
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        if not messagebox.askokcancel(
+                APP_NAME,
+                "SimPro Manager's database was not found where it usually "
+                "lives:\n\n%s\n\nThat is per-user application data, so "
+                "installing SimPro Manager to a custom folder does not move "
+                "it - most likely SimPro Manager has not run on this machine "
+                "yet.\n\nPick user.db yourself?" % DB_PATH):
+            return False
+        path = ask_db_path(root)
+        if not path:
+            return False
+        ok, detail = db_is_usable(path)
+        if not ok:
+            messagebox.showerror(APP_NAME, "%s\n\n%s" % (path, detail))
+            return False
+        set_db_path(path)
+        data = load_settings()
+        data["db_path"] = DB_PATH
+        save_settings(data)
+        return True
+    finally:
+        # Destroyed before launch_gui builds its own: two live Tk roots in one
+        # process is not something to hand a user.
+        root.destroy()
 
 
 def hidtest(seconds=15):
@@ -2648,9 +2750,10 @@ def launch_gui():
             preset_cb.current(pick)
             show_preset()
         running = simpro_running()
-        warn.config(text=("SimPro Manager is running (%s) - close it before saving, "
-                          "or it will overwrite your edit."
-                          % ", ".join(running)) if running else "")
+        warn.config(text="   ".join(x for x in (
+            ("SimPro Manager is running (%s) - close it before saving, or it "
+             "will overwrite your edit." % ", ".join(running)) if running else "",
+            db_notice()) if x))
 
     # ---- actions --------------------------------------------------------
     def make_linear():
@@ -2840,11 +2943,53 @@ def launch_gui():
             messagebox.showerror(APP_NAME,
                                  "Could not open Explorer:\n\n%s" % why)
 
+    def change_db():
+        """Point the editor at another user.db, for the rest of the session.
+
+        Useful beyond a SimPro install that sits somewhere unusual: it is also
+        how you work on a copy, or on a database restored from the backup
+        folder, without the live one being touched at all.
+        """
+        path = ask_db_path(root)
+        if not path or os.path.abspath(path) == DB_PATH:
+            return
+        ok, detail = db_is_usable(path)
+        if not ok:
+            messagebox.showerror(APP_NAME, "%s\n\n%s" % (path, detail))
+            return
+        set_db_path(path)
+        settings["db_path"] = DB_PATH        # the GUI's own copy, which
+        save_settings(settings)              # persist_prefs writes back whole
+        sync["last"] = None                  # snapshots belong to the old DB
+        for fn in (reload_db, sl_reload, pv_reload):
+            fn()
+        messagebox.showinfo(APP_NAME, "Now editing:\n\n%s\n\n%s\n\nThis is "
+                                      "remembered until you change it back."
+                                      % (DB_PATH, detail))
+
+    def db_buttons(parent):
+        """The two database buttons, as one row on every editor tab."""
+        f = ttk.Frame(parent)
+        ttk.Button(f, text="Open DB folder", command=open_db_folder
+                   ).pack(side="left", expand=True, fill="x")
+        ttk.Button(f, text="Change database...", command=change_db
+                   ).pack(side="left", expand=True, fill="x", padx=(6, 0))
+        return f
+
+    def db_notice():
+        """Header text naming the database, when it is not the detected one.
+
+        Silent on an ordinary install. Once you have pointed the editor
+        somewhere else that is worth having in front of you, since every save
+        goes there and not to the copy SimPro is reading.
+        """
+        return ("" if DB_PATH == DEFAULT_DB_PATH else
+                "Editing a chosen database: %s" % DB_PATH)
+
     ttk.Button(btns, text="Reload", command=reload_db).pack(side="left")
     ttk.Button(btns, text="Make linear", command=make_linear).pack(side="left", padx=6)
     ttk.Button(btns, text="Save to DB", command=save).pack(side="right")
-    ttk.Button(side, text="Open DB folder in Explorer",
-               command=open_db_folder).pack(fill="x", pady=(10, 0))
+    db_buttons(side).pack(fill="x", pady=(10, 0))
 
     # Lives in the fixed-height footer, which has room to spare, rather than
     # lengthening the side panel past the chart.
@@ -3237,9 +3382,10 @@ def launch_gui():
             sl_preset_cb.current(pick)
             sl_show_preset()
         running = simpro_running()
-        sl_warn.config(text=("SimPro Manager is running (%s) - close it before "
-                             "saving, or it will overwrite your edit."
-                             % ", ".join(running)) if running else "")
+        sl_warn.config(text="   ".join(x for x in (
+            ("SimPro Manager is running (%s) - close it before saving, or it "
+             "will overwrite your edit." % ", ".join(running)) if running else "",
+            db_notice()) if x))
 
     def sl_make_linear():
         ax = sl["axis"]
@@ -3273,8 +3419,7 @@ def launch_gui():
     ttk.Button(sl_btns, text="Make linear",
                command=sl_make_linear).pack(side="left", padx=6)
     ttk.Button(sl_btns, text="Save to DB", command=sl_save).pack(side="right")
-    ttk.Button(sl_side, text="Open DB folder in Explorer",
-               command=open_db_folder).pack(fill="x", pady=(10, 0))
+    db_buttons(sl_side).pack(fill="x", pady=(10, 0))
     ttk.Label(sl_foot, style="Hint.TLabel", justify="left",
               padding=(12, 0, 12, 0),
               text="Slope is output % gained per pedal travel %. Dotted guides "
@@ -3682,9 +3827,10 @@ def launch_gui():
             pv_preset_cb.current(pick)
             pv_show_preset()
         running = simpro_running()
-        pv_warn.config(text=("SimPro Manager is running (%s) - close it before "
-                             "saving, or it will overwrite your edit."
-                             % ", ".join(running)) if running else "")
+        pv_warn.config(text="   ".join(x for x in (
+            ("SimPro Manager is running (%s) - close it before saving, or it "
+             "will overwrite your edit." % ", ".join(running)) if running else "",
+            db_notice()) if x))
 
     def pv_make_linear():
         pv_x_var.set("50")
@@ -3717,8 +3863,7 @@ def launch_gui():
     ttk.Button(pv_btns, text="Make linear",
                command=pv_make_linear).pack(side="left", padx=6)
     ttk.Button(pv_btns, text="Save to DB", command=pv_save).pack(side="right")
-    ttk.Button(pv_side, text="Open DB folder in Explorer",
-               command=open_db_folder).pack(fill="x", pady=(10, 0))
+    db_buttons(pv_side).pack(fill="x", pady=(10, 0))
 
     for _v in (pv_x_var, pv_y_var, pv_s_var):
         _v.trace_add("write", pv_apply_model)
@@ -4614,7 +4759,10 @@ if __name__ == "__main__":
         finally:
             finish_report(report)
         sys.exit(rc)
-    if not os.path.exists(DB_PATH):
+    saved = load_settings().get("db_path")
+    if saved and os.path.isfile(saved):
+        set_db_path(saved)
+    if not os.path.exists(DB_PATH) and not locate_db():
         sys.exit("SimPro database not found at:\n  %s" % DB_PATH)
     if "--selftest" in sys.argv:
         report = start_report("selftest")
