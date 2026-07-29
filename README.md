@@ -121,6 +121,10 @@ Which is why the Pivot and Slope tabs show you what the stored points *actually 
 next to the figure you asked for. In the screenshot above, a requested pivot slope of 0.59
 is delivered as 0.79 by the three points that can actually be stored.
 
+Those readouts are still arithmetic on the three points, though. The last word belongs to
+the pedals themselves — record a sweep on *Live / Verify* and the measured trace is what
+they really delivered, read off the hardware rather than worked out from the preset.
+
 ## Measuring what the pedals do
 
 The Live / Verify tab reads the pedal's HID report. That report carries both the raw
