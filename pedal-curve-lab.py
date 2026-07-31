@@ -59,7 +59,7 @@ APP_TITLE = "%s for Simagic" % APP_NAME
 
 # Read by the Makefile to name the build and tag the release, so the version
 # is stated once and the two can never disagree.
-APP_VERSION = "0.1.1"
+APP_VERSION = "0.2.0"
 
 # The two places the Help tab sends people. Stated here so the tab is a layout
 # and nothing else, and so a moved video or repo is one edit.
