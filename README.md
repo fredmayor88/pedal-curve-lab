@@ -138,6 +138,11 @@ designed.
 You have to identify the pedal first — click *identify this pedal*, then press it, so the
 tool knows which bytes to watch.
 
+The tab carries the same preset and pedal dropdowns as the editors, and all four stay on
+the same curve: pick a preset anywhere and the rest follow. The measured trace does not —
+it belongs to the pedal, so it survives changing preset and switching tabs, and is only
+dropped when you pick a different pedal or press *Clear*.
+
 That overlay is good for two different jobs:
 
 - **Verify.** Save a curve, push it to the pedals, sweep the pedal, confirm the pedals are really doing what you
@@ -148,6 +153,9 @@ That overlay is good for two different jobs:
   on the travel. This is the screenshot above.
 
 *Clear* removes the measured trace when it stops being useful and starts blocking the view.
+*Hide the stored curve*, under Chart display, does the same job the other way round — it
+takes the red line off every chart and leaves the points, for when it is sitting on top of
+the trace you are trying to read.
 
 ## Hardware support
 

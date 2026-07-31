@@ -2115,7 +2115,13 @@ def launch_gui():
 
     state = {"presets": [], "axes": [], "preset": None, "axis": None, "dirty": False}
     live_refresh = {"fn": None}
-    sync = {"busy": False, "last": None}
+    # "last" names the tab whose curve a tab switch carries over. It is claimed
+    # by a real edit, and by picking a preset or a pedal - both are the user
+    # saying "this is the curve now". "loading" marks the writes a tab makes to
+    # its own fields while populating them from the DB: those fire the same
+    # dirty traces, but they are not edits and must not claim ownership, or the
+    # tab you left ends up overwriting the one you just chose on.
+    sync = {"busy": False, "loading": False, "last": None}
 
     # Every tab uses the same header/footer heights and side-panel width, so the
     # chart lands in an identical rectangle and does not jump when you switch.
@@ -2139,7 +2145,8 @@ def launch_gui():
             "devkey": None, "devices": [], "samples": [], "rec": False,
             "rec_t0": 0.0, "rec_left": None,
             "raw": None, "prev": None, "n": 0, "t0": 0.0, "rate": 0.0,
-            "ident": None, "axes": [], "axis": None, "stats": [], "hexat": 0.0,
+            "ident": None, "presets": [], "preset": None, "axes": [],
+            "axis": None, "stats": [], "hexat": 0.0,
             "drawat": 0.0, "regress": None}
 
     _sweep_cache = {"key": None, "data": []}
@@ -2193,7 +2200,7 @@ def launch_gui():
         shades can be read back as slopes.
         """
         x0, y0, _x1, _y1 = c.hover_geom
-        rows = [("stored curve", ACCENT, STORED_PAL)]
+        rows = [] if hide_stored.get() else [("stored curve", ACCENT, STORED_PAL)]
         if bool(live["samples"]) if measured is None else measured:
             rows.append(("measured", MEAS, MEAS_PAL))
         banded = slope_colour.get()
@@ -2269,6 +2276,8 @@ def launch_gui():
         sample. Runs start on the previous run's last point, so the bands meet
         without gaps.
         """
+        if hide_stored.get():
+            return
         poly = curve_polyline(points, "catmull")
         if not slope_colour.get():
             flat = []
@@ -2403,6 +2412,13 @@ def launch_gui():
     slope_colour = tk.BooleanVar(
         value=bool(settings.get("slope_colour", False)))
 
+    # Takes the red line off every chart and leaves the control points, so the
+    # measured trace can be read on its own. Off by default: the curve is the
+    # thing, and this is for the moments it is sitting on top of what you are
+    # actually trying to look at.
+    hide_stored = tk.BooleanVar(
+        value=bool(settings.get("hide_stored", False)))
+
     def marker_values():
         """Output % of each marker that is set, blanks and junk skipped."""
         out = []
@@ -2434,6 +2450,9 @@ def launch_gui():
         ttk.Checkbutton(f, text="Colour curves by slope",
                         variable=slope_colour).grid(
             row=2, column=0, columnspan=6, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(f, text="Hide the stored curve",
+                        variable=hide_stored).grid(
+            row=3, column=0, columnspan=6, sticky="w", pady=(4, 0))
         return f
 
     rng = ttk.Labelframe(side, text=" Deadzone ", padding=10)
@@ -2682,6 +2701,8 @@ def launch_gui():
                          tooltip_rows(pts, xv))
 
     def mark_dirty(*_):
+        if sync["loading"]:
+            return          # populating the fields, not editing them
         state["dirty"] = True
         if not sync["busy"]:
             sync["last"] = "points"
@@ -2711,9 +2732,13 @@ def launch_gui():
             return
         ax = state["axes"][i]
         state["axis"] = ax
-        lo_var.set("%d" % round(ax["lo"]))
-        hi_var.set("%d" % round(ax["hi"]))
-        build_point_rows(ax["points"])
+        sync["loading"] = True
+        try:
+            lo_var.set("%d" % round(ax["lo"]))
+            hi_var.set("%d" % round(ax["hi"]))
+            build_point_rows(ax["points"])
+        finally:
+            sync["loading"] = False
         state["dirty"] = False
         note = ("   deadzone is not whole - saving rounds it"
                 if any(v != round(v) for v in (ax["lo"], ax["hi"])) else "")
@@ -2741,8 +2766,6 @@ def launch_gui():
                          if a["axis_id"] == 4), 0)
         axis_cb.current(pick)
         show_axis()
-        if live_refresh["fn"]:
-            live_refresh["fn"]()
 
     def reload_db(keep_preset_id=None, keep_axis_id=None):
         try:
@@ -2985,7 +3008,7 @@ def launch_gui():
         settings["db_path"] = DB_PATH        # the GUI's own copy, which
         save_settings(settings)              # persist_prefs writes back whole
         sync["last"] = None                  # snapshots belong to the old DB
-        for fn in (reload_db, sl_reload, pv_reload):
+        for fn in (reload_db, sl_reload, pv_reload, lv_reload):
             fn()
         messagebox.showinfo(APP_NAME, "Now editing:\n\n%s\n\n%s\n\nThis is "
                                       "remembered until you change it back."
@@ -3026,12 +3049,17 @@ def launch_gui():
     lo_var.trace_add("write", mark_dirty)
     hi_var.trace_add("write", mark_dirty)
     def on_preset_change(*_):
+        sync["last"] = "points"          # picking here is choosing the curve
         if state.get("axis"):            # stay on the same pedal across presets
             state["want_axis"] = state["axis"]["axis_id"]
         show_preset()
 
+    def on_axis_change(*_):
+        sync["last"] = "points"
+        show_axis()
+
     preset_cb.bind("<<ComboboxSelected>>", on_preset_change)
-    axis_cb.bind("<<ComboboxSelected>>", show_axis)
+    axis_cb.bind("<<ComboboxSelected>>", on_axis_change)
 
     drag = {"i": None}
 
@@ -3223,6 +3251,8 @@ def launch_gui():
                 var.set(fmt_num(pts[k][1]))
 
     def sl_mark_dirty(*_):
+        if sync["loading"]:
+            return          # populating the fields, not editing them
         sl["dirty"] = True
         if not sync["busy"]:
             sync["last"] = "slope"
@@ -3301,7 +3331,9 @@ def launch_gui():
             lab.grid(row=k + 1, column=2, sticky="w", padx=(6, 0))
             sl_out_labels.append(lab)
             sl_slope_vars.append(var)
-        sl_y1_var.trace_add("write", sl_mark_dirty)
+        # The slope vars are new widgets each time, so they are traced here.
+        # sl_y1_var outlives the rebuild and is traced once, further down -
+        # tracing it here would stack another handler on every preset change.
         for k, v in enumerate(sl_slope_vars):
             v.trace_add("write", sl_slope_edited(k))
         if len(sl_slope_vars) > 1:
@@ -3354,9 +3386,13 @@ def launch_gui():
             return
         ax = sl["axes"][i]
         sl["axis"] = ax
-        sl_lo_var.set("%d" % round(ax["lo"]))
-        sl_hi_var.set("%d" % round(ax["hi"]))
-        sl_build_rows(ax["points"])
+        sync["loading"] = True
+        try:
+            sl_lo_var.set("%d" % round(ax["lo"]))
+            sl_hi_var.set("%d" % round(ax["hi"]))
+            sl_build_rows(ax["points"])
+        finally:
+            sync["loading"] = False
         sl["dirty"] = False
         sl_refresh_outputs()
         sl_status.config(text="axis id %s   %d slopes"
@@ -3453,14 +3489,20 @@ def launch_gui():
 
     sl_lo_var.trace_add("write", sl_mark_dirty)
     sl_hi_var.trace_add("write", sl_mark_dirty)
+    sl_y1_var.trace_add("write", sl_mark_dirty)
 
     def sl_on_preset_change(*_):
+        sync["last"] = "slope"           # picking here is choosing the curve
         if sl.get("axis"):
             sl["want_axis"] = sl["axis"]["axis_id"]
         sl_show_preset()
 
+    def sl_on_axis_change(*_):
+        sync["last"] = "slope"
+        sl_show_axis()
+
     sl_preset_cb.bind("<<ComboboxSelected>>", sl_on_preset_change)
-    sl_axis_cb.bind("<<ComboboxSelected>>", sl_show_axis)
+    sl_axis_cb.bind("<<ComboboxSelected>>", sl_on_axis_change)
 
     def sl_point_near(ev, radius=14):
         g = getattr(sl_canvas, "hover_geom", None)
@@ -3747,6 +3789,8 @@ def launch_gui():
         return fit_pivot_from_points(pts)
 
     def pv_mark_dirty(*_):
+        if sync["loading"]:
+            return          # populating the fields, not editing them
         pv["dirty"] = True
         if not sync["busy"] and not pv_sync["busy"]:
             sync["last"] = "pivot"
@@ -3794,6 +3838,7 @@ def launch_gui():
         # Load the stored points exactly, and set the pivot to the closest fit;
         # opening the tab must not silently reshape the curve.
         pv_sync["busy"] = True
+        sync["loading"] = True
         try:
             pv_lo_var.set("%d" % round(ax["lo"]))
             pv_hi_var.set("%d" % round(ax["hi"]))
@@ -3804,6 +3849,7 @@ def launch_gui():
             pv_s_var.set(fmt_num(gs))
         finally:
             pv_sync["busy"] = False
+            sync["loading"] = False
         pv["dirty"] = False
         pv_refresh_readouts()
         pv_redraw()
@@ -3895,12 +3941,17 @@ def launch_gui():
         _v.trace_add("write", pv_mark_dirty)
 
     def pv_on_preset_change(*_):
+        sync["last"] = "pivot"           # picking here is choosing the curve
         if pv.get("axis"):
             pv["want_axis"] = pv["axis"]["axis_id"]
         pv_show_preset()
 
+    def pv_on_axis_change(*_):
+        sync["last"] = "pivot"
+        pv_show_axis()
+
     pv_preset_cb.bind("<<ComboboxSelected>>", pv_on_preset_change)
-    pv_axis_cb.bind("<<ComboboxSelected>>", pv_show_axis)
+    pv_axis_cb.bind("<<ComboboxSelected>>", pv_on_axis_change)
 
     def pv_near_pivot(ev, radius=16):
         g = getattr(pv_canvas, "hover_geom", None)
@@ -3945,6 +3996,14 @@ def launch_gui():
     # other was last edited to. Switching tabs is the only moment it matters,
     # since you can never see both at once.
     def editor_snapshot(which):
+        if which == "live":
+            # Nothing is edited there, so what it hands on is the stored curve
+            # of whatever preset and pedal it is pointed at.
+            p, ax = live.get("preset"), live.get("axis")
+            if not p or not ax:
+                return None
+            return (p["id"], ax["axis_id"], int(round(ax["lo"])),
+                    int(round(ax["hi"])), list(ax["points"]))
         if which == "points":
             st, lov, hiv, pts = state, lo_var, hi_var, cur_points()
         elif which == "pivot":
@@ -4022,6 +4081,7 @@ def launch_gui():
         pv_refresh_readouts()
         pv_redraw()
 
+    # Live / Verify joins this further down, once its widgets exist.
     TABS = {str(tab_curve): ("points", apply_to_points),
             str(tab_pivot): ("pivot", apply_to_pivot),
             str(tab_slope): ("slope", apply_to_slope)}
@@ -4053,11 +4113,16 @@ def launch_gui():
     lv_head.grid(row=0, column=0, sticky="nsew")
     lv_top = ttk.Frame(lv_head, padding=(12, 10, 12, 4))
     lv_top.pack(fill="x")
-    ttk.Label(lv_top, text="Pedal").pack(side="left")
-    lv_axis_cb = ttk.Combobox(lv_top, state="readonly", width=26)
-    lv_axis_cb.pack(side="left", padx=(6, 16))
+    # Same two dropdowns in the same places as the editor tabs, so the header
+    # does not rearrange itself when you switch to this one.
+    ttk.Label(lv_top, text="Preset").grid(row=0, column=0, sticky="w")
+    lv_preset_cb = ttk.Combobox(lv_top, state="readonly", width=38)
+    lv_preset_cb.grid(row=0, column=1, padx=(6, 18))
+    ttk.Label(lv_top, text="Pedal").grid(row=0, column=2, sticky="w")
+    lv_axis_cb = ttk.Combobox(lv_top, state="readonly", width=24)
+    lv_axis_cb.grid(row=0, column=3, padx=6)
     lv_dev = ttk.Label(lv_top, text="", style="Hint.TLabel")
-    lv_dev.pack(side="left")
+    lv_dev.grid(row=0, column=4, sticky="w", padx=(12, 0))
     # Stands in for the editors' warning line so the header is the same height.
     ttk.Label(lv_head, text="", style="Hint.TLabel",
               padding=(12, 0)).pack(fill="x")
@@ -4157,20 +4222,97 @@ def launch_gui():
         i = lv_axis_cb.current()
         return live["axes"][i] if 0 <= i < len(live["axes"]) else None
 
-    def refresh_live_axes():
-        live["axes"] = list(state["axes"])
-        lv_axis_cb["values"] = ["%s  (%g-%g%%)" % (a["name"], a["lo"], a["hi"])
-                                for a in live["axes"]]
-        if live["axes"]:
-            pick = next((n for n, a in enumerate(live["axes"])
-                         if a["axis_id"] == 4), 0)
-            lv_axis_cb.current(pick)
-        live["samples"].clear()
-        live["stats"].clear()
+    def lv_show_axis(*_):
+        """Adopt whatever pedal the axis combo is on.
+
+        The sweep is only thrown away when the pedal itself changes. It is
+        measurement, not preset data, and switching tabs or looking at another
+        preset's curve is exactly when you want the reference trace to stay
+        put - that is what it is recorded for.
+        """
+        was = live["axis"]["axis_id"] if live.get("axis") else None
+        ax = lv_sel_axis()
+        live["axis"] = ax
+        if ax is not None and ax["axis_id"] != was and live["samples"]:
+            clear_sweep()
         update_pair_label()
         draw_live()
 
-    live_refresh["fn"] = refresh_live_axes
+    def lv_show_preset(*_):
+        i = lv_preset_cb.current()
+        if i < 0:
+            return
+        p = live["presets"][i]
+        live["preset"] = p
+        live["axes"] = parse_axes(p["blob"])
+        lv_axis_cb["values"] = ["%s  (%g-%g%%)" % (a["name"], a["lo"], a["hi"])
+                                for a in live["axes"]]
+        want = live.pop("want_axis", None)
+        pick = None
+        if want is not None:
+            pick = next((n for n, a in enumerate(live["axes"])
+                         if a["axis_id"] == want), None)
+        if pick is None:
+            pick = next((n for n, a in enumerate(live["axes"])
+                         if a["axis_id"] == 4), 0)
+        lv_axis_cb.current(pick)
+        lv_show_axis()
+
+    def lv_reload(keep_preset_id=None, keep_axis_id=None):
+        """Same shape as the editor tabs' reloads, minus the SimPro warning -
+        this tab writes nothing, so it has nothing to warn about."""
+        try:
+            live["presets"] = load_presets()
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, "Cannot read the DB:\n\n%s" % exc)
+            return
+        lv_preset_cb["values"] = preset_labels(live["presets"])
+        if not live["presets"]:
+            live["preset"] = None
+            live["axes"] = []
+            live["axis"] = None
+            lv_axis_cb["values"] = []
+            update_pair_label()
+            draw_live()
+            return
+        pick = None
+        if keep_preset_id is not None:
+            pick = next((n for n, p in enumerate(live["presets"])
+                         if p["id"] == keep_preset_id), None)
+        if pick is None:
+            pick = pick_selected_preset(live["presets"])
+        if pick is None:
+            pick = len(live["presets"]) - 1
+        if keep_axis_id is not None:
+            live["want_axis"] = keep_axis_id
+        lv_preset_cb.current(pick)
+        lv_show_preset()
+
+    def lv_refresh():
+        """Re-read the DB, holding this tab's own selection. What the editors
+        reach for after a save, since the curve under the measured trace has
+        just changed."""
+        p, ax = live.get("preset"), live.get("axis")
+        lv_reload(p["id"] if p else None, ax["axis_id"] if ax else None)
+
+    live_refresh["fn"] = lv_refresh
+
+    def lv_on_preset_change(*_):
+        sync["last"] = "live"            # picking here is choosing the curve
+        if live.get("axis"):             # stay on the same pedal across presets
+            live["want_axis"] = live["axis"]["axis_id"]
+        lv_show_preset()
+
+    def lv_on_axis_change(*_):
+        sync["last"] = "live"
+        lv_show_axis()
+
+    lv_preset_cb.bind("<<ComboboxSelected>>", lv_on_preset_change)
+    lv_axis_cb.bind("<<ComboboxSelected>>", lv_on_axis_change)
+
+    TABS[str(tab_live)] = ("live", lambda snap: _select(
+        lv_preset_cb, lv_axis_cb, live, lv_show_preset, lv_show_axis,
+        snap[0], snap[1]))
 
     def update_pair_label():
         ax = lv_sel_axis()
@@ -4649,10 +4791,6 @@ def launch_gui():
     lv_dev_cb.bind("<<ComboboxSelected>>", on_device_selected)
     lv_dev_btn.config(command=rescan_devices)
 
-    lv_axis_cb.bind("<<ComboboxSelected>>",
-                    lambda *_: (live["samples"].clear(), live["stats"].clear(),
-                                update_pair_label(), draw_live()))
-
     def live_motion(ev):
         v = hover_pct(lv_canvas, ev)
         hover["live"] = (v, ev.y) if v is not None else None
@@ -4679,6 +4817,7 @@ def launch_gui():
         prefs_save["job"] = None
         settings["markers"] = [v.get().strip() for v in marker_vars]
         settings["slope_colour"] = bool(slope_colour.get())
+        settings["hide_stored"] = bool(hide_stored.get())
         save_settings(settings)
 
     def display_changed(*_):
@@ -4693,6 +4832,7 @@ def launch_gui():
     for _mv in marker_vars:
         _mv.trace_add("write", display_changed)
     slope_colour.trace_add("write", display_changed)
+    hide_stored.trace_add("write", display_changed)
 
     # ================= Help tab =================
     #
@@ -4811,7 +4951,8 @@ def launch_gui():
                    "curve, so mix and match freely: rough the shape out on the "
                    "pivot tab, nudge a point by hand on the 3-point tab, then "
                    "check it against the pedal on Live / Verify. Switching "
-                   "tabs carries your edit across.", pady=(12, 0))
+                   "tabs carries the preset, the pedal and your edit across, "
+                   "so all four are always on the same curve.", pady=(12, 0))
 
     # ---- the limitation -------------------------------------------------
     sec = help_section(right, "What actually reaches the pedals")
@@ -4879,7 +5020,7 @@ def launch_gui():
                command=show_backups).pack(anchor="w", pady=(10, 0))
 
     connect(refresh_devices())
-    refresh_live_axes()
+    lv_reload()
     pump()
     nb.select(tab_live if "--live" in sys.argv else
               tab_slope if "--slope" in sys.argv else
@@ -4906,9 +5047,10 @@ def launch_gui():
     # label first). Text is scaled by scale * 1.3333 while these constants are
     # scaled by scale alone, so it needs headroom beyond the scale-1 layout.
     # 950 not 900: the Pivot tab carries one section more than the others, and
-    # +25 for the slope-colour row added to the Chart display box.
-    root.geometry("%dx%d" % (int(1120 * scale), int(975 * scale)))
-    root.minsize(int(900 * scale), int(845 * scale))
+    # +25 each for the slope-colour and hide-stored rows added to the Chart
+    # display box.
+    root.geometry("%dx%d" % (int(1120 * scale), int(1000 * scale)))
+    root.minsize(int(900 * scale), int(870 * scale))
     root.mainloop()
 
 
